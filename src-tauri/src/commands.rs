@@ -281,42 +281,14 @@ pub fn set_pinned(
 }
 
 #[tauri::command]
-pub async fn set_compact(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    compact: bool,
-) -> AppResult<()> {
-    let window = app.get_webview_window("main").ok_or("主窗口不存在")?;
-    let mut settings = state
-        .store
-        .lock()
-        .map_err(|_| "数据暂不可用")?
-        .settings
-        .clone();
-    if settings.compact == compact {
-        return Ok(());
-    }
-    if compact {
-        settings.full_geometry = windows::geometry(&window);
-        windows::mode(&window, true, settings.compact_geometry.as_ref())?;
-    } else {
-        settings.compact_geometry = windows::geometry(&window);
-        windows::mode(&window, false, None)?;
-        if let Some(geometry) = &settings.full_geometry {
-            windows::restore(&window, geometry);
-        } else {
-            window
-                .set_size(tauri::LogicalSize::new(1000.0, 800.0))
-                .map_err(|error| error.to_string())?;
-        }
-    }
-    settings.compact = compact;
-    settings.geometry = windows::geometry(&window);
-    let mut store = state.store.lock().map_err(|_| "数据暂不可用")?;
-    storage::save(&store.db, "settings", "main", &settings)?;
-    store.settings = settings;
-    drop(store);
-    broadcast(&app)
+pub async fn set_compact(app: AppHandle, compact: bool) -> AppResult<()> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let _ = sender.send(windows::set_compact(&handle, compact));
+    })
+    .map_err(|error| error.to_string())?;
+    receiver.await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

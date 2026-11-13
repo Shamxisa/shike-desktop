@@ -1,10 +1,16 @@
 use crate::{models::Geometry, storage, AppResult, AppState};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
 
 static SHAPE_SIZE: std::sync::Mutex<Option<(usize, u32, u32, u32)>> = std::sync::Mutex::new(None);
+static MODE_CHANGING: AtomicBool = AtomicBool::new(false);
+
+pub fn changing_mode() -> bool {
+    MODE_CHANGING.load(Ordering::Relaxed)
+}
 
 pub fn shape(window: &WebviewWindow, compact: bool) -> AppResult<()> {
     #[cfg(windows)]
@@ -17,7 +23,7 @@ pub fn shape(window: &WebviewWindow, compact: bool) -> AppResult<()> {
         let key = compact.then_some((handle as usize, size.width, size.height, diameter));
         {
             let mut cached = SHAPE_SIZE.lock().map_err(|_| "窗口外形暂不可用")?;
-            if *cached == key {
+            if compact && *cached == key {
                 return Ok(());
             }
             *cached = key;
@@ -60,6 +66,15 @@ pub fn refresh_shape(window: &WebviewWindow) -> AppResult<()> {
 }
 
 pub fn mode(window: &WebviewWindow, compact: bool, saved: Option<&Geometry>) -> AppResult<()> {
+    // Keep native resize events from saving intermediate geometry or restoring the old clipping.
+    MODE_CHANGING.store(true, Ordering::Relaxed);
+    let result = apply_mode(window, compact, saved);
+    MODE_CHANGING.store(false, Ordering::Relaxed);
+    result
+}
+
+fn apply_mode(window: &WebviewWindow, compact: bool, saved: Option<&Geometry>) -> AppResult<()> {
+    shape(window, false)?;
     if window.is_maximized().map_err(|error| error.to_string())? {
         window.unmaximize().map_err(|error| error.to_string())?;
     }
@@ -78,28 +93,82 @@ pub fn mode(window: &WebviewWindow, compact: bool, saved: Option<&Geometry>) -> 
     window
         .set_maximizable(!compact)
         .map_err(|error| error.to_string())?;
-    if compact {
-        let scale = window.scale_factor().map_err(|error| error.to_string())?;
-        let size = PhysicalSize::new(
-            saved
-                .map(|geometry| geometry.width)
-                .unwrap_or((388.0 * scale).floor() as u32)
-                .max((300.0 * scale).floor() as u32),
-            saved
-                .map(|geometry| geometry.height)
-                .unwrap_or((242.0 * scale).floor() as u32)
-                .max((220.0 * scale).floor() as u32),
-        );
-        window.set_size(size).map_err(|error| error.to_string())?;
-        window
-            .set_min_size(Some(tauri::LogicalSize::new(300.0, 220.0)))
-            .map_err(|error| error.to_string())?;
+    let scale = window.scale_factor().map_err(|error| error.to_string())?;
+    let (minimum_width, minimum_height, default_width, default_height) = if compact {
+        (300.0, 220.0, 388.0, 242.0)
     } else {
-        window
-            .set_min_size(Some(tauri::LogicalSize::new(360.0, 420.0)))
-            .map_err(|error| error.to_string())?;
+        (360.0, 420.0, 1000.0, 800.0)
+    };
+    let minimum = PhysicalSize::new(
+        (minimum_width * scale).ceil() as u32,
+        (minimum_height * scale).ceil() as u32,
+    );
+    // Older settings can contain a compact size in the full-window record.
+    let usable_saved = saved.filter(|geometry| {
+        compact || (geometry.width >= minimum.width && geometry.height >= minimum.height)
+    });
+    window
+        .set_size(PhysicalSize::new(
+            usable_saved
+                .map(|geometry| geometry.width)
+                .unwrap_or((default_width * scale).round() as u32)
+                .max(minimum.width),
+            usable_saved
+                .map(|geometry| geometry.height)
+                .unwrap_or((default_height * scale).round() as u32)
+                .max(minimum.height),
+        ))
+        .map_err(|error| error.to_string())?;
+    window
+        .set_min_size(Some(tauri::LogicalSize::new(minimum_width, minimum_height)))
+        .map_err(|error| error.to_string())?;
+    if let Some(geometry) = saved {
+        restore_position(window, geometry)?;
     }
     shape(window, compact)
+}
+
+pub fn set_compact(app: &AppHandle, compact: bool) -> AppResult<()> {
+    let window = app.get_webview_window("main").ok_or("主窗口不存在")?;
+    let state = app.state::<AppState>();
+    let previous = state
+        .store
+        .lock()
+        .map_err(|_| "数据暂不可用")?
+        .settings
+        .clone();
+    if previous.compact == compact {
+        return shape(&window, compact);
+    }
+    let current_geometry = geometry(&window).ok_or("读取窗口尺寸失败")?;
+    let saved = if compact {
+        previous.compact_geometry.as_ref()
+    } else {
+        previous.full_geometry.as_ref()
+    };
+    let result = (|| {
+        mode(&window, compact, saved)?;
+        let next_geometry = geometry(&window).ok_or("读取窗口尺寸失败")?;
+        let mut store = state.store.lock().map_err(|_| "数据暂不可用")?;
+        let mut settings = store.settings.clone();
+        if compact {
+            settings.full_geometry = Some(current_geometry.clone());
+            settings.compact_geometry = Some(next_geometry.clone());
+        } else {
+            settings.compact_geometry = Some(current_geometry.clone());
+            settings.full_geometry = Some(next_geometry.clone());
+        }
+        settings.compact = compact;
+        settings.geometry = Some(next_geometry);
+        storage::save(&store.db, "settings", "main", &settings)?;
+        store.settings = settings;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = mode(&window, previous.compact, Some(&current_geometry));
+        return Err(error);
+    }
+    crate::commands::broadcast(app)
 }
 
 pub fn geometry(window: &WebviewWindow) -> Option<Geometry> {
@@ -118,6 +187,10 @@ pub fn restore(window: &WebviewWindow, geometry: &Geometry) {
         geometry.width.max(300),
         geometry.height.max(240),
     ));
+    let _ = restore_position(window, geometry);
+}
+
+fn restore_position(window: &WebviewWindow, geometry: &Geometry) -> AppResult<()> {
     let visible = window
         .available_monitors()
         .unwrap_or_default()
@@ -131,8 +204,11 @@ pub fn restore(window: &WebviewWindow, geometry: &Geometry) {
                 && geometry.y < position.y + size.height as i32 - 50
         });
     if visible {
-        let _ = window.set_position(PhysicalPosition::new(geometry.x, geometry.y));
+        window
+            .set_position(PhysicalPosition::new(geometry.x, geometry.y))
+            .map_err(|error| error.to_string())?;
     }
+    Ok(())
 }
 
 pub fn open_note(app: &AppHandle, id: &str) -> AppResult<()> {
@@ -186,6 +262,8 @@ pub fn track(app: &AppHandle, label: &str, closing: bool) {
     if label == "main" {
         if store.settings.compact {
             store.settings.compact_geometry = geometry.clone();
+        } else {
+            store.settings.full_geometry = geometry.clone();
         }
         store.settings.geometry = geometry;
     } else if let Some(id) = label.strip_prefix("note-") {

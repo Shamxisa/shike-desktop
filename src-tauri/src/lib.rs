@@ -157,18 +157,18 @@ pub fn run() {
             tray.build(app)?;
             if let Some(window) = app.get_webview_window("main") {
                 window.set_always_on_top(settings.pinned)?;
-                if let Some(geometry) = &settings.geometry {
-                    windows::restore(&window, geometry);
-                }
-                let compact_geometry = if settings.compact {
+                let saved_geometry = if settings.compact {
                     settings
                         .compact_geometry
                         .as_ref()
                         .or(settings.geometry.as_ref())
                 } else {
-                    None
+                    settings
+                        .geometry
+                        .as_ref()
+                        .or(settings.full_geometry.as_ref())
                 };
-                windows::mode(&window, settings.compact, compact_geometry)
+                windows::mode(&window, settings.compact, saved_geometry)
                     .map_err(std::io::Error::other)?;
                 if !std::env::args().any(|argument| argument == "--autostart") {
                     window.show()?;
@@ -183,6 +183,17 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() == "main"
+                && windows::changing_mode()
+                && matches!(
+                    event,
+                    WindowEvent::Moved(_)
+                        | WindowEvent::Resized(_)
+                        | WindowEvent::ScaleFactorChanged { .. }
+                )
+            {
+                return;
+            }
             let app = window.app_handle();
             match event {
                 WindowEvent::Moved(_) => windows::track(app, window.label(), false),
