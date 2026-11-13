@@ -1,0 +1,33 @@
+{
+  "name": "shike-desktop",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "test": "node --test tests/countdown-clock.test.mjs",
+    "preview": "vite preview --host 127.0.0.1",
+    "tauri": "tauri",
+    "desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop.ps1",
+    "desktop:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop.ps1 -Action dev",
+    "backend:check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop.ps1 -Action check",
+    "backend:test": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop.ps1 -Action test"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.10.0",
+    "@tauri-apps/plugin-autostart": "^2.5.0",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0"
+  }
+}
